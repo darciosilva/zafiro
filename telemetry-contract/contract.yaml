@@ -1,0 +1,141 @@
+# Zafiro 遥测契约(PRD v1.0)。两端的事实来源(R-51)。
+# 手写镜像:business/api/src/main/java/com/niki914/zafiro/api/telemetry/TelemetryContract.kt
+# 本期 events 与 custom 为空(R-68)。核对按运行时的值比对,不生成代码。
+
+schema_version: 1
+contract_version: 1
+
+# 整个渠道名必须匹配该模式(R-70 的 [a-z0-9_]{1,32})。
+channel_name_pattern: "[a-z0-9_]{1,32}"
+
+# kind: PRD R-70 规定 unknown、dev、legacy。github、xposed 的 kind 用方案里的 official、repo。
+# first_channel_only 为 true 时,该渠道只用于 install.first_channel。
+channels:
+  - name: github
+    kind: official
+    first_channel_only: false
+  - name: xposed
+    kind: repo
+    first_channel_only: false
+  - name: dev
+    kind: dev
+    first_channel_only: false
+  - name: legacy
+    kind: legacy
+    first_channel_only: true
+  - name: unknown
+    kind: unknown
+    first_channel_only: false
+
+# 每项: name、description、labels、status(active 或 deprecated)、added_in、replaced_by。
+# 标签按声明顺序。replaced_by 为空时不写。expired 的事件不出现在客户端常量里(R-47)。
+events: []
+
+# 每项: name、type(string|int|bool|enum)、role(dimension|measure,仅 count)、
+# agg(sum|max,仅 measure)、enum_values、max_chars、min、max、added_in。
+# 值为空的可选字段不写。键按 scope 分三组。
+custom:
+  envelope: []
+  day: []
+  count: []
+
+# 布尔键没有 min/max。整数键的默认值落在 min 与 max 之间(含端点)。
+config_keys:
+  - name: telemetry_enabled
+    type: bool
+    default: true
+  - name: report_interval_hours
+    type: int
+    default: 24
+    min: 24
+    max: 168
+  - name: config_ttl_hours
+    type: int
+    default: 12
+    min: 12
+    max: 168
+
+# 客户端可以更严的数字不在这里:保留今天和前 7 天(R-35)、退避 1/2/4 小时(R-40)、记住最近 9 天删过的日期(R-37)。
+limits:
+  # §6.4
+  body_bytes: 32768
+  days_min: 1
+  days_max: 8
+  counts_per_page: 64
+  firsts_per_page: 64
+  unplanned_events_per_page: 8
+  event_name_max_chars: 40
+  label_max_chars: 40
+  count_n_max: 1000000
+  custom_keys_max: 16
+  undeclared_custom_keys_max: 8
+  custom_string_max_chars: 40
+  brand_max_chars: 64
+  model_max_chars: 64
+  installer_max_chars: 100
+  tz_offset_min: -720
+  tz_offset_max: 840
+  # 字段表、R-27、R-34 中的硬上限。§6.4 没有单独一行。
+  count_n_min: 1
+  measure_min: 0
+  measure_max: 2147483647
+  lang_max_chars: 16
+  day_key_length: 36
+  activity_window_past_days: 8
+
+# device.* 的名字、类型、可空。数值上限在 limits,不在这里重复。
+# 不含 device.gms、device.rom_family。
+profile_fields:
+  - name: api_level
+    type: int
+    nullable: true
+  - name: lang
+    type: string
+    nullable: true
+  - name: brand
+    type: string
+    nullable: false
+  - name: model
+    type: string
+    nullable: false
+  - name: abi
+    type: string
+    nullable: false
+  - name: ram_gb
+    type: int
+    nullable: false
+  - name: screen_class
+    type: string
+    nullable: false
+  - name: locale_region
+    type: string
+    nullable: true
+  - name: tz_id
+    type: string
+    nullable: false
+  - name: tz_offset_min
+    type: int
+    nullable: false
+
+# 总内存 GB 向上取到不小于它的最小档;大于 24 记 24。
+ram_gb_buckets: [2, 3, 4, 6, 8, 12, 16, 24]
+
+# 不大于最小宽度 dp 的最大档;小于 320 记 320。
+screen_width_dp: [320, 360, 400, 480, 600, 720]
+
+# 离 densityDpi 最近的一档;距离相等取较高档。列表按 dpi 升序,较高档在后。
+screen_density:
+  - name: mdpi
+    dpi: 160
+  - name: hdpi
+    dpi: 240
+  - name: xhdpi
+    dpi: 320
+  - name: xxhdpi
+    dpi: 480
+  - name: xxxhdpi
+    dpi: 640
+
+build_types:
+  - release
+  - debug
