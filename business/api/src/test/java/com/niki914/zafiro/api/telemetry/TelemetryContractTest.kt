@@ -1,4 +1,4 @@
-// 保护：手写常量与 telemetry-contract/contract.yaml 分叉，或常量写成表达式、同名写了两次。服务端只正则读 const val，这种改动会让两端上限或渠道对不上。
+// 保护：TelemetryContract.kt 的常量若改名、改值，或新增 LIMIT_/CHANNEL_/CONFIG_KEY_ 但不在服务端 MAPPING 里，核对脚本会报错，两端上限和渠道对不上。
 package com.niki914.zafiro.api.telemetry
 
 import org.junit.Assert.assertEquals
@@ -8,179 +8,313 @@ import java.io.File
 class TelemetryContractTest {
 
     @Test
-    fun `hand written const vals match contract yaml`() {
-        val source = contractSource()
-        assertEquals("", blockCommentsWithConst(source).joinToString("\n"))
-        val consts = parseConstVals(source)
-        assertEquals("", duplicateNames(source).joinToString("\n"))
-        val yaml = parseContractYaml(readRepoFile(File("telemetry-contract", "contract.yaml")))
-        val left = consts.toMutableMap()
-
-        fun take(name: String): Any? {
-            if (name !in left) return missing
-            return left.remove(name)
-        }
-
-        val problems = mutableListOf<String>()
-        fun eq(label: String, expected: Any?, actual: Any?) {
-            if (expected != actual) problems += "$label: 契约 $expected, 常量 $actual"
-        }
-
-        eq("schema_version", yaml["schema_version"], take("SCHEMA_VERSION"))
-        eq("contract_version", yaml["contract_version"], take("CONTRACT_VERSION"))
-        eq("channel_name_pattern", yaml["channel_name_pattern"], take("CHANNEL_NAME_PATTERN"))
-        eq("event_count", (yaml["events"] as List<*>).size, take("EVENT_COUNT"))
-        val custom = yaml["custom"] as Map<*, *>
-        val customCount = listOf("envelope", "day", "count").sumOf { (custom[it] as List<*>).size }
-        eq("custom_key_count", customCount, take("CUSTOM_KEY_COUNT"))
-
-        val yamlChannels = (yaml["channels"] as List<*>).map { it as Map<*, *> }
-        yamlChannels.forEach { channel ->
-            val wire = channel["name"] as String
-            eq("channel $wire", wire, take("CHANNEL_${wire.uppercase()}"))
-        }
-        eq(
-            "channels",
-            yamlChannels.map { channel ->
-                listOf(channel["name"], channel["kind"], channel["first_channel_only"])
-            },
-            TelemetryContract.channels.map { listOf(it.name, it.kind, it.firstChannelOnly) },
+    fun `const vals match the server mapping`() {
+        val source = readRepoFile(
+            File("business/api/src/main/java/com/niki914/zafiro/api/telemetry/TelemetryContract.kt"),
         )
-
-        eq(
-            "config",
-            yaml["config_keys"],
-            listOf(
-                configRow(
-                    take("CONFIG_KEY_TELEMETRY_ENABLED"),
-                    "bool",
-                    take("CONFIG_DEFAULT_TELEMETRY_ENABLED"),
-                    null,
-                    null,
-                ),
-                configRow(
-                    take("CONFIG_KEY_REPORT_INTERVAL_HOURS"),
-                    "int",
-                    take("LIMIT_REPORT_INTERVAL_HOURS_DEFAULT"),
-                    take("LIMIT_REPORT_INTERVAL_HOURS_MIN"),
-                    take("LIMIT_REPORT_INTERVAL_HOURS_MAX"),
-                ),
-                configRow(
-                    take("CONFIG_KEY_CONFIG_TTL_HOURS"),
-                    "int",
-                    take("LIMIT_CONFIG_TTL_HOURS_DEFAULT"),
-                    take("LIMIT_CONFIG_TTL_HOURS_MIN"),
-                    take("LIMIT_CONFIG_TTL_HOURS_MAX"),
-                ),
-            ),
-        )
-
-        val limits = yaml["limits"] as Map<*, *>
-        limits.forEach { (key, value) ->
-            eq("limit $key", value, take("LIMIT_${key.toString().uppercase()}"))
-        }
-
-        eq("ram_gb_buckets", joinInts(yaml["ram_gb_buckets"]), take("RAM_GB_BUCKETS"))
-        eq("screen_width_dp", joinInts(yaml["screen_width_dp"]), take("SCREEN_WIDTH_DP_BUCKETS"))
-        val density = (yaml["screen_density"] as List<*>).joinToString(",") { item ->
-            val bucket = item as Map<*, *>
-            "${bucket["name"]}:${bucket["dpi"]}"
-        }
-        eq("screen_density", density, take("SCREEN_DENSITY_BUCKETS"))
-        eq("build_types", (yaml["build_types"] as List<*>).joinToString(","), take("BUILD_TYPES"))
-        eq(
-            "profile_fields",
-            yaml["profile_fields"],
-            TelemetryContract.profileFields.map {
-                linkedMapOf("name" to it.name, "type" to it.type, "nullable" to it.nullable)
-            },
-        )
-
-        consts.forEach { (name, value) ->
-            val compiled = compiledConst(name)
+        val parsed = parseKotlin(source)
+        val problems = compareKotlin(parsed).toMutableList()
+        problems += yamlDrift(parseContractYaml(readRepoFile(File("telemetry-contract", "contract.yaml"))))
+        parsed.consts.forEach { (name, value) ->
+            if (value is RawLiteral) return@forEach
+            val compiled = TelemetryContract::class.java.getField(name).get(null)
             if (compiled != value) problems += "$name: 源码 $value, 编译结果 $compiled"
         }
-        if (left.isNotEmpty()) problems += "常量没有契约对照: ${left.keys.sorted()}"
         assertEquals("", problems.joinToString("\n"))
     }
-
-    private fun configRow(
-        name: Any?,
-        type: String,
-        default: Any?,
-        min: Any?,
-        max: Any?,
-    ): Map<String, Any?> {
-        val row = linkedMapOf<String, Any?>("name" to name, "type" to type, "default" to default)
-        if (min != null) row["min"] = min
-        if (max != null) row["max"] = max
-        return row
-    }
-
-    private fun joinInts(value: Any?): String = (value as List<*>).joinToString(",")
-
-    private fun compiledConst(name: String): Any? =
-        TelemetryContract::class.java.getField(name).get(null)
-
-    private fun contractSource(): String =
-        readRepoFile(
-            File(
-                "business/api/src/main/java/com/niki914/zafiro/api/telemetry/TelemetryContract.kt",
-            ),
-        )
-
-    private fun readRepoFile(relative: File): String {
-        var dir: File? = File(System.getProperty("user.dir")).absoluteFile
-        while (dir != null) {
-            val candidate = File(dir, relative.path)
-            if (candidate.isFile) return candidate.readText()
-            dir = dir.parentFile
-        }
-        error("找不到 ${relative.path}")
-    }
 }
 
-private val missing = Any()
+private val watchedPrefixes = listOf("LIMIT_", "CHANNEL_", "CONFIG_KEY_")
 
-private val constLine = Regex("""^const val ([A-Z][A-Z0-9_]*) = (.+)$""")
+private val mapping: List<Pair<String, Any>> = listOf(
+    "SCHEMA_VERSION" to 1,
+    "CONTRACT_VERSION" to 1,
+    "LIMIT_BODY_BYTES" to 32768,
+    "LIMIT_DAYS_MIN" to 1,
+    "LIMIT_DAYS_MAX" to 8,
+    "LIMIT_COUNTS_PER_DAY" to 64,
+    "LIMIT_FIRSTS_PER_DAY" to 64,
+    "LIMIT_UNPLANNED_EVENTS_PER_DAY" to 8,
+    "LIMIT_NAME_LENGTH" to 40,
+    "LIMIT_COUNT_N_MIN" to 1,
+    "LIMIT_COUNT_N_MAX" to 1000000,
+    "LIMIT_CUSTOM_KEYS" to 16,
+    "LIMIT_CUSTOM_UNDECLARED_KEYS" to 8,
+    "LIMIT_CUSTOM_STRING_LENGTH" to 40,
+    "LIMIT_BRAND_LENGTH" to 64,
+    "LIMIT_MODEL_LENGTH" to 64,
+    "LIMIT_INSTALLER_LENGTH" to 100,
+    "LIMIT_TZ_OFFSET_MIN" to -720,
+    "LIMIT_TZ_OFFSET_MAX" to 840,
+    "LIMIT_METRIC_MIN" to 0,
+    "LIMIT_METRIC_MAX" to 2147483647,
+    "LIMIT_CHANNEL_NAME_MIN" to 1,
+    "LIMIT_CHANNEL_NAME_MAX" to 32,
+    "LIMIT_CHANNEL_NAME_PATTERN" to "[a-z0-9_]{1,32}",
+    "LIMIT_LANG_LENGTH" to 16,
+    "LIMIT_APP_LANG_LENGTH" to 16,
+    "LIMIT_LOCALE_REGION_LENGTH" to 2,
+    "LIMIT_DAY_KEY_LENGTH" to 36,
+    "LIMIT_ACTIVITY_WINDOW_DAYS" to 8,
+    "LIMIT_CLIENT_RETENTION_PAST_DAYS" to 7,
+    "LIMIT_CLOCK_ROLLBACK_DAYS" to 8,
+    "LIMIT_DELETED_DAY_MEMORY_DAYS" to 9,
+    "LIMIT_REV_MIN" to 1,
+    "LIMIT_DROPPED_DAYS_MIN" to 0,
+    "LIMIT_COUNTS_TRUNCATED_MIN" to 0,
+    "LIMIT_VERSION_CODE_MIN" to 1,
+    "CHANNEL_GITHUB_NAME" to "github",
+    "CHANNEL_GITHUB_KIND" to "official",
+    "CHANNEL_XPOSED_NAME" to "xposed",
+    "CHANNEL_XPOSED_KIND" to "repo",
+    "CHANNEL_UNKNOWN_NAME" to "unknown",
+    "CHANNEL_UNKNOWN_KIND" to "unknown",
+    "CHANNEL_DEV_NAME" to "dev",
+    "CHANNEL_DEV_KIND" to "dev",
+    "CHANNEL_LEGACY_NAME" to "legacy",
+    "CHANNEL_LEGACY_KIND" to "legacy",
+    "CONFIG_KEY_TELEMETRY_ENABLED_TYPE" to "bool",
+    "CONFIG_KEY_TELEMETRY_ENABLED_DEFAULT" to true,
+    "CONFIG_KEY_REPORT_INTERVAL_HOURS_TYPE" to "int",
+    "CONFIG_KEY_REPORT_INTERVAL_HOURS_DEFAULT" to 24,
+    "CONFIG_KEY_REPORT_INTERVAL_HOURS_MIN" to 24,
+    "CONFIG_KEY_REPORT_INTERVAL_HOURS_MAX" to 168,
+    "CONFIG_KEY_CONFIG_TTL_HOURS_TYPE" to "int",
+    "CONFIG_KEY_CONFIG_TTL_HOURS_DEFAULT" to 12,
+    "CONFIG_KEY_CONFIG_TTL_HOURS_MIN" to 12,
+    "CONFIG_KEY_CONFIG_TTL_HOURS_MAX" to 168,
+    "RAM_GB_BUCKETS" to "2,3,4,6,8,12,16,24",
+    "SCREEN_WIDTH_BUCKETS" to "320,360,400,480,600,720",
+    "SCREEN_DENSITY_BUCKETS" to "mdpi:160,hdpi:240,xhdpi:320,xxhdpi:480,xxxhdpi:640",
+    "BUILD_TYPES" to "release,debug",
+    "PROFILE_FIELDS" to "api_level,brand,model,abi,ram_gb,screen_class,lang,app_lang,locale_region,tz_id,tz_offset_min,installer",
+    "EVENT_COUNT" to 0,
+    "CUSTOM_KEY_COUNT" to 0,
+)
 
-private val literal = Regex("-?[0-9]+|true|false|\"[^\"]*\"")
+private class RawLiteral(val raw: String)
 
-private fun blockCommentsWithConst(source: String): List<String> =
-    Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL).findAll(source)
-        .filter { "const val" in it.value }
-        .map { "块注释里写了常量" }
-        .toList()
+private class ParsedKotlin(
+    val consts: Map<String, Any?>,
+    val duplicates: List<String>,
+)
 
-private fun parseConstVals(source: String): Map<String, Any?> {
-    val visible = Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL).replace(source, "")
-    val values = linkedMapOf<String, Any?>()
-    visible.lines().forEach { raw ->
-        val line = raw.substringBefore("//").trim()
-        val match = constLine.matchEntire(line) ?: return@forEach
-        val name = match.groupValues[1]
-        val token = match.groupValues[2].trim()
-        if (!literal.matches(token)) error("$name 的值不是字面量: $token")
-        values[name] = when {
-            token == "true" -> true
-            token == "false" -> false
-            token.startsWith("\"") -> token.removeSurrounding("\"")
-            else -> token.toInt()
+private fun compareKotlin(parsed: ParsedKotlin): List<String> {
+    val diffs = mutableListOf<String>()
+    val known = mapping.map { it.first }.toSet()
+    for ((name, expected) in mapping) {
+        val actual = parsed.consts[name]
+        val same = actual !is RawLiteral && actual == expected
+        if (actual == null || !same) {
+            diffs += "$name: server=${formatValue(expected)} android=${formatParsed(actual)}"
         }
     }
-    return values
+    for (name in parsed.duplicates) {
+        diffs += "$name: server=one definition android=duplicate"
+    }
+    for ((name, value) in parsed.consts) {
+        if (watchedPrefixes.any { name.startsWith(it) } && name !in known) {
+            diffs += "$name: server=not in mapping android=${formatParsed(value)}"
+        }
+    }
+    return diffs
 }
 
-private fun duplicateNames(source: String): List<String> {
-    val visible = Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL).replace(source, "")
-    val seen = mutableSetOf<String>()
-    val dup = mutableListOf<String>()
-    visible.lines().forEach { raw ->
-        val match = constLine.matchEntire(raw.substringBefore("//").trim()) ?: return@forEach
-        val name = match.groupValues[1]
-        if (!seen.add(name)) dup += "同名常量 $name"
+private fun formatValue(value: Any?): String = when (value) {
+    is String -> "\"$value\""
+    else -> value.toString()
+}
+
+private fun formatParsed(value: Any?): String = when (value) {
+    null -> "missing"
+    is RawLiteral -> value.raw
+    else -> formatValue(value)
+}
+
+private fun yamlDrift(yaml: Map<String, Any?>): List<String> {
+    val problems = mutableListOf<String>()
+    fun eq(label: String, expected: Any?, actual: Any?) {
+        if (expected != actual) problems += "$label: 契约 $actual, 名单 $expected"
     }
-    return dup
+    val expected = mapping.toMap()
+    eq("schema_version", expected["SCHEMA_VERSION"], yaml["schema_version"])
+    eq("contract_version", expected["CONTRACT_VERSION"], yaml["contract_version"])
+    eq("channel_name_pattern", expected["LIMIT_CHANNEL_NAME_PATTERN"], yaml["channel_name_pattern"])
+    eq("event_count", expected["EVENT_COUNT"], (yaml["events"] as List<*>).size)
+    val custom = yaml["custom"] as Map<*, *>
+    val customCount = listOf("envelope", "day", "count").sumOf { (custom[it] as List<*>).size }
+    eq("custom_key_count", expected["CUSTOM_KEY_COUNT"], customCount)
+
+    val yamlChannels = (yaml["channels"] as List<*>).map { it as Map<*, *> }
+    eq(
+        "channels",
+        listOf("GITHUB", "XPOSED", "DEV", "LEGACY", "UNKNOWN").map { id ->
+            listOf(expected["CHANNEL_${id}_NAME"], expected["CHANNEL_${id}_KIND"], id == "LEGACY")
+        },
+        yamlChannels.map { listOf(it["name"], it["kind"], it["first_channel_only"]) },
+    )
+    eq(
+        "channel list",
+        yamlChannels.map { listOf(it["name"], it["kind"], it["first_channel_only"]) },
+        TelemetryContract.channels.map { listOf(it.name, it.kind, it.firstChannelOnly) },
+    )
+
+    eq(
+        "config",
+        listOf(
+            configRow("telemetry_enabled", "TELEMETRY_ENABLED", expected, withRange = false),
+            configRow("report_interval_hours", "REPORT_INTERVAL_HOURS", expected, withRange = true),
+            configRow("config_ttl_hours", "CONFIG_TTL_HOURS", expected, withRange = true),
+        ),
+        yaml["config_keys"],
+    )
+
+    val limits = (yaml["limits"] as Map<*, *>).mapKeys { it.key.toString() }
+    val limitNames = mapping.map { it.first }.filter { it.startsWith("LIMIT_") && it != "LIMIT_CHANNEL_NAME_PATTERN" }
+    val limitKeys = limitNames.map { it.removePrefix("LIMIT_").lowercase() }
+    eq("limit keys", limitKeys, limits.keys.toList())
+    limitNames.forEach { name ->
+        eq(name, expected[name], limits[name.removePrefix("LIMIT_").lowercase()])
+    }
+
+    eq("ram_gb_buckets", expected["RAM_GB_BUCKETS"], (yaml["ram_gb_buckets"] as List<*>).joinToString(","))
+    eq("screen_width_buckets", expected["SCREEN_WIDTH_BUCKETS"], (yaml["screen_width_buckets"] as List<*>).joinToString(","))
+    val density = (yaml["screen_density"] as List<*>).joinToString(",") { item ->
+        val bucket = item as Map<*, *>
+        "${bucket["name"]}:${bucket["dpi"]}"
+    }
+    eq("screen_density", expected["SCREEN_DENSITY_BUCKETS"], density)
+    eq("build_types", expected["BUILD_TYPES"], (yaml["build_types"] as List<*>).joinToString(","))
+    val fields = (yaml["profile_fields"] as List<*>).map { it as Map<*, *> }
+    eq("profile_fields", expected["PROFILE_FIELDS"], fields.joinToString(",") { it["name"].toString() })
+    eq(
+        "profile list",
+        fields.map { listOf(it["name"], it["type"], it["nullable"]) },
+        TelemetryContract.profileFields.map { listOf(it.name, it.type, it.nullable) },
+    )
+    return problems
+}
+
+private fun configRow(
+    name: String,
+    id: String,
+    expected: Map<String, Any>,
+    withRange: Boolean,
+): Map<String, Any?> {
+    val row = linkedMapOf<String, Any?>(
+        "name" to name,
+        "type" to expected.getValue("CONFIG_KEY_${id}_TYPE"),
+        "default" to expected.getValue("CONFIG_KEY_${id}_DEFAULT"),
+    )
+    if (withRange) {
+        row["min"] = expected.getValue("CONFIG_KEY_${id}_MIN")
+        row["max"] = expected.getValue("CONFIG_KEY_${id}_MAX")
+    }
+    return row
+}
+
+private fun readRepoFile(relative: File): String {
+    var dir: File? = File(System.getProperty("user.dir")).absoluteFile
+    while (dir != null) {
+        val candidate = File(dir, relative.path)
+        if (candidate.isFile) return candidate.readText()
+        dir = dir.parentFile
+    }
+    error("找不到 ${relative.path}")
+}
+
+private val declaration =
+    Regex("""^(?:public|internal|private)?\s*const\s+val\s+([A-Za-z_][A-Za-z0-9_]*)\b(.*)$""")
+
+private fun parseKotlin(source: String): ParsedKotlin {
+    val consts = linkedMapOf<String, Any?>()
+    val duplicates = mutableListOf<String>()
+    for (rawLine in stripKotlinComments(source).split("\n", "\r\n")) {
+        val match = declaration.matchEntire(rawLine.trim()) ?: continue
+        val name = match.groupValues[1]
+        val rest = match.groupValues[2]
+        val eq = rest.indexOf('=')
+        if (eq < 0) continue
+        if (name in consts) {
+            duplicates += name
+            continue
+        }
+        consts[name] = parseLiteral(rest.substring(eq + 1))
+    }
+    return ParsedKotlin(consts, duplicates)
+}
+
+private fun parseLiteral(raw: String): Any? {
+    val text = raw.trim().removeSuffix(",").trim()
+    when (text) {
+        "true" -> return true
+        "false" -> return false
+    }
+    if (text.length >= 2 && text.startsWith("\"") && text.endsWith("\"")) {
+        return text.substring(1, text.length - 1)
+    }
+    val withoutLong = if (text.endsWith("L") || text.endsWith("l")) text.dropLast(1) else text
+    val normalized = withoutLong.replace("_", "")
+    if (Regex("-?\\d+").matches(normalized)) return normalized.toInt()
+    return RawLiteral(text)
+}
+
+private fun stripKotlinComments(source: String): String {
+    val out = StringBuilder()
+    var i = 0
+    fun at(offset: Int): Char = source.getOrElse(offset) { '\u0000' }
+    while (i < source.length) {
+        val ch = source[i]
+        val next = at(i + 1)
+        if (ch == '"' && next == '"' && at(i + 2) == '"') {
+            out.append("\"\"\"")
+            i += 3
+            while (i < source.length) {
+                if (at(i) == '"' && at(i + 1) == '"' && at(i + 2) == '"') {
+                    out.append("\"\"\"")
+                    i += 3
+                    break
+                }
+                out.append(source[i])
+                i += 1
+            }
+            continue
+        }
+        if (ch == '"' || ch == '\'') {
+            out.append(ch)
+            i += 1
+            while (i < source.length) {
+                val s = source[i]
+                if (s == '\\') {
+                    out.append(s)
+                    if (i + 1 < source.length) out.append(source[i + 1])
+                    i += 2
+                    continue
+                }
+                out.append(s)
+                i += 1
+                if (s == ch) break
+            }
+            continue
+        }
+        if (ch == '/' && next == '/') {
+            i += 2
+            while (i < source.length && source[i] != '\n') i += 1
+            continue
+        }
+        if (ch == '/' && next == '*') {
+            i += 2
+            while (i < source.length && !(source[i] == '*' && at(i + 1) == '/')) {
+                if (source[i] == '\n') out.append('\n')
+                i += 1
+            }
+            i += 2
+            continue
+        }
+        out.append(ch)
+        i += 1
+    }
+    return out.toString()
 }
 
 private fun parseContractYaml(text: String): Map<String, Any?> {

@@ -1,14 +1,15 @@
 # Zafiro 遥测契约(PRD v1.0)。两端的事实来源(R-51)。
 # 手写镜像:business/api/src/main/java/com/niki914/zafiro/api/telemetry/TelemetryContract.kt
-# 本期 events 与 custom 为空(R-68)。核对按运行时的值比对,不生成代码。
+# 常量名字以服务端 scripts/check-contract.ts 的 MAPPING 为准。
+# 本期 events 与 custom 为空(R-68)。
 
 schema_version: 1
 contract_version: 1
 
-# 整个渠道名必须匹配该模式(R-70 的 [a-z0-9_]{1,32})。
+# 整个渠道名必须匹配该模式。对应 LIMIT_CHANNEL_NAME_PATTERN。
 channel_name_pattern: "[a-z0-9_]{1,32}"
 
-# kind 只写在 channels[] 里,不上报、不入库。
+# kind 同时写在 CHANNEL_*_KIND。上报信封不带 kind。
 # github=official, xposed=repo, dev=dev, legacy=legacy, unknown=unknown。
 # first_channel_only 为 true 时,该渠道只用于 install.first_channel。
 # 本期没有应用市场渠道。
@@ -58,45 +59,45 @@ config_keys:
     max: 168
 
 limits:
-  # §6.4
   body_bytes: 32768
   days_min: 1
   days_max: 8
-  counts_per_page: 64
-  firsts_per_page: 64
-  unplanned_events_per_page: 8
-  event_name_max_chars: 40
-  label_max_chars: 40
+  counts_per_day: 64
+  firsts_per_day: 64
+  unplanned_events_per_day: 8
+  name_length: 40
+  count_n_min: 1
   count_n_max: 1000000
-  custom_keys_max: 16
-  undeclared_custom_keys_max: 8
-  custom_string_max_chars: 40
-  brand_max_chars: 64
-  model_max_chars: 64
-  installer_max_chars: 100
+  custom_keys: 16
+  custom_undeclared_keys: 8
+  custom_string_length: 40
+  brand_length: 64
+  model_length: 64
+  installer_length: 100
   tz_offset_min: -720
   tz_offset_max: 840
-  # 字段表、R-27、R-34 中的硬上限。§6.4 没有单独一行。
-  count_n_min: 1
-  measure_min: 0
-  measure_max: 2147483647
-  lang_max_chars: 16
+  metric_min: 0
+  metric_max: 2147483647
+  channel_name_min: 1
+  channel_name_max: 32
+  lang_length: 16
+  app_lang_length: 16
+  locale_region_length: 2
   day_key_length: 36
-  # R-34 的接收窗口。R-37 回拨超过这个天数时清空本地活跃记录,用同一个数。
-  activity_window_past_days: 8
-  # 下面三项只在客户端使用。两端常量都写,避免只存在于一边。
-  retain_past_days: 7
+  activity_window_days: 8
+  client_retention_past_days: 7
+  clock_rollback_days: 8
   deleted_day_memory_days: 9
-  retry_backoff_hours: "1,2,4"
+  rev_min: 1
+  dropped_days_min: 0
+  counts_truncated_min: 0
+  version_code_min: 1
 
-# device.* 的名字、类型、可空。数值上限在 limits,不在这里重复。
-# 不含 device.gms、device.rom_family。
+# 顺序与 PROFILE_FIELDS 一致。含 app.app_lang 与 install.installer,不只是 device.*。
+# 不含 gms、rom_family。类型和可空来自安卓 schema。
 profile_fields:
   - name: api_level
     type: int
-    nullable: true
-  - name: lang
-    type: string
     nullable: true
   - name: brand
     type: string
@@ -113,6 +114,12 @@ profile_fields:
   - name: screen_class
     type: string
     nullable: false
+  - name: lang
+    type: string
+    nullable: true
+  - name: app_lang
+    type: string
+    nullable: true
   - name: locale_region
     type: string
     nullable: true
@@ -122,12 +129,15 @@ profile_fields:
   - name: tz_offset_min
     type: int
     nullable: false
+  - name: installer
+    type: string
+    nullable: true
 
 # 总内存 GB 向上取到不小于它的最小档;大于 24 记 24。
 ram_gb_buckets: [2, 3, 4, 6, 8, 12, 16, 24]
 
 # 不大于最小宽度 dp 的最大档;小于 320 记 320。
-screen_width_dp: [320, 360, 400, 480, 600, 720]
+screen_width_buckets: [320, 360, 400, 480, 600, 720]
 
 # 离 densityDpi 最近的一档;距离相等取较高档。列表按 dpi 升序,较高档在后。
 screen_density:
