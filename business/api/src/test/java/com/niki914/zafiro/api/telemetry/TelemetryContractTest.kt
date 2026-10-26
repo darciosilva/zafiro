@@ -1,302 +1,187 @@
-// 保护：手写常量与 telemetry-contract/contract.yaml 分叉。只改契约或只改常量时,渠道、上限或配置默认值会按错误的数发出去。
+// 保护：手写常量与 telemetry-contract/contract.yaml 分叉，或常量写成表达式、同名写了两次。服务端只正则读 const val，这种改动会让两端上限或渠道对不上。
 package com.niki914.zafiro.api.telemetry
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.io.File
-import java.lang.reflect.Modifier
-import java.util.Locale
 
 class TelemetryContractTest {
 
     @Test
-    fun `hand written constants match contract yaml`() {
-        assertEquals("", structureGaps().joinToString("\n"))
-        val expected = expectedTree()
-        val actual = parseContractYaml(contractFile().readText())
-        assertEquals("\n${render(expected)}\n---\n${render(actual)}", expected, actual)
-    }
+    fun `hand written const vals match contract yaml`() {
+        val source = contractSource()
+        assertEquals("", blockCommentsWithConst(source).joinToString("\n"))
+        val consts = parseConstVals(source)
+        assertEquals("", duplicateNames(source).joinToString("\n"))
+        val yaml = parseContractYaml(readRepoFile(File("telemetry-contract", "contract.yaml")))
+        val left = consts.toMutableMap()
 
-    private fun structureGaps(): List<String> {
-        val gaps = mutableListOf<String>()
-        fun fields(type: Class<*>, expected: Set<String>) {
-            val actual = type.declaredFields
-                .filter { !it.isSynthetic && !Modifier.isStatic(it.modifiers) && '$' !in it.name }
-                .map { it.name }
-                .toSet()
-            if (actual != expected) {
-                gaps += "${type.simpleName} 字段 $actual,投影 $expected"
-            }
+        fun take(name: String): Any? {
+            if (name !in left) return missing
+            return left.remove(name)
         }
-        fields(
-            TelemetryContract.Channel::class.java,
-            setOf("name", "kind", "firstChannelOnly"),
-        )
-        fields(
-            TelemetryContract.ConfigKey::class.java,
-            setOf("name", "type", "default", "min", "max"),
-        )
-        fields(
-            TelemetryContract.ProfileField::class.java,
-            setOf("name", "type", "nullable"),
-        )
-        fields(
-            TelemetryContract.DensityBucket::class.java,
-            setOf("name", "dpi"),
-        )
-        fields(EventDef::class.java, eventFields.toSet())
-        fields(
-            CustomKeyDef::class.java,
-            customItemFields.toSet() + "scope",
-        )
-        gaps += constGaps(
-            "渠道名",
-            TelemetryContract.channels.map { it.name },
-            TelemetryContract.ChannelName::class.java,
-        )
-        gaps += constGaps(
-            "渠道种类",
-            TelemetryContract.channels.map { it.kind },
-            TelemetryContract.ChannelKind::class.java,
-        )
-        gaps += constGaps(
-            "配置键",
-            TelemetryContract.configKeys.map { it.name },
-            TelemetryContract.ConfigName::class.java,
-        )
-        gaps += constGaps(
-            "配置类型",
-            TelemetryContract.configKeys.map { it.type },
-            TelemetryContract.ConfigType::class.java,
-        )
-        gaps += constGaps(
-            "画像类型",
-            TelemetryContract.profileFields.map { it.type },
-            TelemetryContract.FieldType::class.java,
-        )
-        gaps += constGaps(
-            "构建类型",
-            TelemetryContract.buildTypes,
-            TelemetryContract.BuildType::class.java,
-        )
-        gaps += memberGaps()
-        return gaps
-    }
 
-    private fun constGaps(label: String, used: List<String>, type: Class<*>): List<String> {
-        val declared = type.fields
-            .filter {
-                Modifier.isStatic(it.modifiers) &&
-                    it.type == String::class.java &&
-                    '$' !in it.name
-            }
-            .map { it.get(null) as String }
-        val gaps = mutableListOf<String>()
-        if (declared.size != declared.toSet().size) gaps += "$label 常量值重复: $declared"
-        val unused = declared.toSet() - used.toSet()
-        val unknown = used.toSet() - declared.toSet()
-        if (unused.isNotEmpty()) gaps += "$label 常量没有进清单: $unused"
-        if (unknown.isNotEmpty()) gaps += "$label 清单有契约常量之外的值: $unknown"
-        return gaps
-    }
-
-    private fun memberGaps(): List<String> {
-        val gaps = mutableListOf<String>()
-        val type = TelemetryContract::class.java
-        val getters = type.declaredMethods
-            .filter {
-                !it.isSynthetic &&
-                    it.parameterCount == 0 &&
-                    it.name.startsWith("get") &&
-                    it.name != "getClass"
-            }
-            .map { it.name }
-            .sorted()
-        val expectedGetters = listOf(
-            "getBuildTypes",
-            "getChannels",
-            "getConfigKeys",
-            "getCustomKeys",
-            "getEvents",
-            "getProfileFields",
-            "getRamGbBuckets",
-            "getScreenDensity",
-            "getScreenWidthDp",
-        )
-        if (getters != expectedGetters) gaps += "TelemetryContract 访问器 $getters"
-        val properties = getters.map { it.removePrefix("get").replaceFirstChar { c -> c.lowercase(Locale.ROOT) } }.toSet()
-        val staticOnly = type.declaredFields
-            .filter {
-                Modifier.isStatic(it.modifiers) &&
-                    it.name != "INSTANCE" &&
-                    !it.isSynthetic &&
-                    '$' !in it.name &&
-                    it.name !in properties
-            }
-            .map { it.name }
-            .sorted()
-        val expectedStatic = listOf("CHANNEL_NAME_PATTERN", "CONTRACT_VERSION", "SCHEMA_VERSION")
-        if (staticOnly != expectedStatic) gaps += "TelemetryContract 常量 $staticOnly"
-        return gaps
-    }
-
-    private fun expectedTree(): Map<String, Any?> = linkedMapOf(
-        "schema_version" to TelemetryContract.SCHEMA_VERSION,
-        "contract_version" to TelemetryContract.CONTRACT_VERSION,
-        "channel_name_pattern" to TelemetryContract.CHANNEL_NAME_PATTERN,
-        "channels" to TelemetryContract.channels.map {
-            project(it, listOf("name", "kind", "firstChannelOnly"))
-        },
-        "events" to TelemetryContract.events.map {
-            project(it, eventFields)
-        },
-        "custom" to CustomKeyDef.Scope.entries.associate { scope ->
-            scope.name.lowercase(Locale.ROOT) to TelemetryContract.customKeys
-                .filter { it.scope == scope }
-                .map { project(it, customItemFields) }
-        },
-        "config_keys" to TelemetryContract.configKeys.map {
-            project(it, listOf("name", "type", "default", "min", "max"))
-        },
-        "limits" to limitsFromCode(),
-        "profile_fields" to TelemetryContract.profileFields.map {
-            project(it, listOf("name", "type", "nullable"))
-        },
-        "ram_gb_buckets" to TelemetryContract.ramGbBuckets,
-        "screen_width_dp" to TelemetryContract.screenWidthDp,
-        "screen_density" to TelemetryContract.screenDensity.map {
-            project(it, listOf("name", "dpi"))
-        },
-        "build_types" to TelemetryContract.buildTypes,
-    )
-
-    private fun limitsFromCode(): Map<String, Int> =
-        TelemetryContract.Limits::class.java.fields
-            .filter {
-                Modifier.isStatic(it.modifiers) &&
-                    it.type == Int::class.javaPrimitiveType &&
-                    '$' !in it.name
-            }
-            .associate { it.name.lowercase(Locale.ROOT) to it.getInt(null) }
-
-    private fun project(target: Any, fieldNames: List<String>): Map<String, Any?> {
-        val map = linkedMapOf<String, Any?>()
-        for (name in fieldNames) {
-            val raw = read(target, name) ?: continue
-            map[camelToSnake(name)] = normalize(raw)
+        val problems = mutableListOf<String>()
+        fun eq(label: String, expected: Any?, actual: Any?) {
+            if (expected != actual) problems += "$label: 契约 $expected, 常量 $actual"
         }
-        return map
+
+        eq("schema_version", yaml["schema_version"], take("SCHEMA_VERSION"))
+        eq("contract_version", yaml["contract_version"], take("CONTRACT_VERSION"))
+        eq("channel_name_pattern", yaml["channel_name_pattern"], take("CHANNEL_NAME_PATTERN"))
+        eq("event_count", (yaml["events"] as List<*>).size, take("EVENT_COUNT"))
+        val custom = yaml["custom"] as Map<*, *>
+        val customCount = listOf("envelope", "day", "count").sumOf { (custom[it] as List<*>).size }
+        eq("custom_key_count", customCount, take("CUSTOM_KEY_COUNT"))
+
+        val yamlChannels = (yaml["channels"] as List<*>).map { it as Map<*, *> }
+        yamlChannels.forEach { channel ->
+            val wire = channel["name"] as String
+            eq("channel $wire", wire, take("CHANNEL_${wire.uppercase()}"))
+        }
+        eq(
+            "channels",
+            yamlChannels.map { channel ->
+                listOf(channel["name"], channel["kind"], channel["first_channel_only"])
+            },
+            TelemetryContract.channels.map { listOf(it.name, it.kind, it.firstChannelOnly) },
+        )
+
+        eq(
+            "config",
+            yaml["config_keys"],
+            listOf(
+                configRow(
+                    take("CONFIG_KEY_TELEMETRY_ENABLED"),
+                    "bool",
+                    take("CONFIG_DEFAULT_TELEMETRY_ENABLED"),
+                    null,
+                    null,
+                ),
+                configRow(
+                    take("CONFIG_KEY_REPORT_INTERVAL_HOURS"),
+                    "int",
+                    take("LIMIT_REPORT_INTERVAL_HOURS_DEFAULT"),
+                    take("LIMIT_REPORT_INTERVAL_HOURS_MIN"),
+                    take("LIMIT_REPORT_INTERVAL_HOURS_MAX"),
+                ),
+                configRow(
+                    take("CONFIG_KEY_CONFIG_TTL_HOURS"),
+                    "int",
+                    take("LIMIT_CONFIG_TTL_HOURS_DEFAULT"),
+                    take("LIMIT_CONFIG_TTL_HOURS_MIN"),
+                    take("LIMIT_CONFIG_TTL_HOURS_MAX"),
+                ),
+            ),
+        )
+
+        val limits = yaml["limits"] as Map<*, *>
+        limits.forEach { (key, value) ->
+            eq("limit $key", value, take("LIMIT_${key.toString().uppercase()}"))
+        }
+
+        eq("ram_gb_buckets", joinInts(yaml["ram_gb_buckets"]), take("RAM_GB_BUCKETS"))
+        eq("screen_width_dp", joinInts(yaml["screen_width_dp"]), take("SCREEN_WIDTH_DP_BUCKETS"))
+        val density = (yaml["screen_density"] as List<*>).joinToString(",") { item ->
+            val bucket = item as Map<*, *>
+            "${bucket["name"]}:${bucket["dpi"]}"
+        }
+        eq("screen_density", density, take("SCREEN_DENSITY_BUCKETS"))
+        eq("build_types", (yaml["build_types"] as List<*>).joinToString(","), take("BUILD_TYPES"))
+        eq(
+            "profile_fields",
+            yaml["profile_fields"],
+            TelemetryContract.profileFields.map {
+                linkedMapOf("name" to it.name, "type" to it.type, "nullable" to it.nullable)
+            },
+        )
+
+        consts.forEach { (name, value) ->
+            val compiled = compiledConst(name)
+            if (compiled != value) problems += "$name: 源码 $value, 编译结果 $compiled"
+        }
+        if (left.isNotEmpty()) problems += "常量没有契约对照: ${left.keys.sorted()}"
+        assertEquals("", problems.joinToString("\n"))
     }
 
-    private fun read(target: Any, name: String): Any? {
-        val suffix = name.replaceFirstChar { it.uppercase(Locale.ROOT) }
-        val getter = target.javaClass.methods.firstOrNull {
-            it.parameterCount == 0 && (it.name == "get$suffix" || it.name == "is$suffix")
-        } ?: error("${target.javaClass.simpleName} 没有 $name 的访问器")
-        return getter.invoke(target)
+    private fun configRow(
+        name: Any?,
+        type: String,
+        default: Any?,
+        min: Any?,
+        max: Any?,
+    ): Map<String, Any?> {
+        val row = linkedMapOf<String, Any?>("name" to name, "type" to type, "default" to default)
+        if (min != null) row["min"] = min
+        if (max != null) row["max"] = max
+        return row
     }
 
-    private fun normalize(raw: Any): Any = when (raw) {
-        is TelemetryContract.ConfigDefault.OfBool -> raw.value
-        is TelemetryContract.ConfigDefault.OfInt -> raw.value
-        is Enum<*> -> raw.name.lowercase(Locale.ROOT)
-        is List<*> -> raw.map { item -> if (item == null) null else normalize(item) }
-        else -> raw
-    }
+    private fun joinInts(value: Any?): String = (value as List<*>).joinToString(",")
 
-    private fun camelToSnake(name: String): String =
-        name.replace(Regex("([a-z0-9])([A-Z])")) {
-            "${it.groupValues[1]}_${it.groupValues[2]}"
-        }.lowercase(Locale.ROOT)
+    private fun compiledConst(name: String): Any? =
+        TelemetryContract::class.java.getField(name).get(null)
 
-    private fun contractFile(): File {
-        val relative = File("telemetry-contract", "contract.yaml")
+    private fun contractSource(): String =
+        readRepoFile(
+            File(
+                "business/api/src/main/java/com/niki914/zafiro/api/telemetry/TelemetryContract.kt",
+            ),
+        )
+
+    private fun readRepoFile(relative: File): String {
         var dir: File? = File(System.getProperty("user.dir")).absoluteFile
         while (dir != null) {
             val candidate = File(dir, relative.path)
-            if (candidate.isFile) return candidate
+            if (candidate.isFile) return candidate.readText()
             dir = dir.parentFile
         }
-        error("找不到 telemetry-contract/contract.yaml")
-    }
-
-    private fun render(value: Any?): String =
-        buildString { appendValue(value, 0) }.removePrefix("\n")
-
-    private fun StringBuilder.appendValue(value: Any?, indent: Int) {
-        when (value) {
-            null -> append("null")
-            is Map<*, *> -> appendMap(value, indent)
-            is List<*> -> appendList(value, indent)
-            is String, is Boolean, is Int -> append(value.toString())
-            else -> error("无法渲染 ${value.javaClass.simpleName}")
-        }
-    }
-
-    private fun StringBuilder.appendMap(value: Map<*, *>, indent: Int) {
-        val keys = value.keys.map { it as String }.sorted()
-        if (keys.isEmpty()) {
-            append("{}")
-            return
-        }
-        for (key in keys) {
-            append("\n").append("  ".repeat(indent)).append(key).append(":")
-            val child = value[key]
-            if (child is Map<*, *> || (child is List<*> && child.any { it is Map<*, *> })) {
-                appendValue(child, indent + 1)
-            } else {
-                append(" ")
-                appendValue(child, indent + 1)
-            }
-        }
-    }
-
-    private fun StringBuilder.appendList(value: List<*>, indent: Int) {
-        if (value.isEmpty()) {
-            append("[]")
-            return
-        }
-        if (value.any { it is Map<*, *> }) {
-            for (item in value) {
-                append("\n").append("  ".repeat(indent)).append("-")
-                if (item is Map<*, *>) {
-                    appendMap(item, indent + 1)
-                } else {
-                    append(" ")
-                    appendValue(item, indent + 1)
-                }
-            }
-        } else {
-            append("[")
-            value.forEachIndexed { index, item ->
-                if (index > 0) append(", ")
-                appendValue(item, indent)
-            }
-            append("]")
-        }
+        error("找不到 ${relative.path}")
     }
 }
 
-private val eventFields = listOf(
-    "name",
-    "description",
-    "labels",
-    "status",
-    "addedIn",
-    "replacedBy",
-)
+private val missing = Any()
 
-private val customItemFields = listOf(
-    "name",
-    "type",
-    "role",
-    "agg",
-    "enumValues",
-    "maxChars",
-    "min",
-    "max",
-    "addedIn",
-)
+private val constLine = Regex("""^const val ([A-Z][A-Z0-9_]*) = (.+)$""")
+
+private val literal = Regex("-?[0-9]+|true|false|\"[^\"]*\"")
+
+private fun blockCommentsWithConst(source: String): List<String> =
+    Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL).findAll(source)
+        .filter { "const val" in it.value }
+        .map { "块注释里写了常量" }
+        .toList()
+
+private fun parseConstVals(source: String): Map<String, Any?> {
+    val visible = Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL).replace(source, "")
+    val values = linkedMapOf<String, Any?>()
+    visible.lines().forEach { raw ->
+        val line = raw.substringBefore("//").trim()
+        val match = constLine.matchEntire(line) ?: return@forEach
+        val name = match.groupValues[1]
+        val token = match.groupValues[2].trim()
+        if (!literal.matches(token)) error("$name 的值不是字面量: $token")
+        values[name] = when {
+            token == "true" -> true
+            token == "false" -> false
+            token.startsWith("\"") -> token.removeSurrounding("\"")
+            else -> token.toInt()
+        }
+    }
+    return values
+}
+
+private fun duplicateNames(source: String): List<String> {
+    val visible = Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL).replace(source, "")
+    val seen = mutableSetOf<String>()
+    val dup = mutableListOf<String>()
+    visible.lines().forEach { raw ->
+        val match = constLine.matchEntire(raw.substringBefore("//").trim()) ?: return@forEach
+        val name = match.groupValues[1]
+        if (!seen.add(name)) dup += "同名常量 $name"
+    }
+    return dup
+}
 
 private fun parseContractYaml(text: String): Map<String, Any?> {
     val lines = mutableListOf<YamlLine>()
@@ -391,7 +276,7 @@ private class ContractYamlParser(private val lines: List<YamlLine>) {
         val colon = text.indexOf(':')
         if (colon <= 0) fail(line, "缺少键: $text")
         val key = text.substring(0, colon).trim()
-        if (!KEY.matches(key)) fail(line, "非法键 $key")
+        if (!Regex("[A-Za-z0-9_]+").matches(key)) fail(line, "非法键 $key")
         val rest = text.substring(colon + 1).trim()
         return key to rest.ifEmpty { null }
     }
@@ -416,7 +301,7 @@ private class ContractYamlParser(private val lines: List<YamlLine>) {
                 if (inner.contains("[") || inner.contains("]")) fail(line, "不支持嵌套的单行列表")
                 return inner.split(",").map { parseScalar(line, it.trim()) }
             }
-            INT.matches(raw) -> return raw.toIntOrNull() ?: fail(line, "整数超出范围 $raw")
+            Regex("-?[0-9]+").matches(raw) -> return raw.toIntOrNull() ?: fail(line, "整数超出范围 $raw")
             raw.any { it.isWhitespace() } -> fail(line, "裸字符串不能含空白")
             else -> return raw
         }
@@ -425,10 +310,5 @@ private class ContractYamlParser(private val lines: List<YamlLine>) {
     private fun fail(line: YamlLine?, message: String): Nothing {
         val where = line?.let { "第 ${it.number} 行" } ?: "文件末尾"
         error("$where: $message")
-    }
-
-    private companion object {
-        val KEY: Regex = Regex("[A-Za-z0-9_]+")
-        val INT: Regex = Regex("-?[0-9]+")
     }
 }

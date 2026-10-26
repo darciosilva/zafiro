@@ -8,8 +8,10 @@ contract_version: 1
 # 整个渠道名必须匹配该模式(R-70 的 [a-z0-9_]{1,32})。
 channel_name_pattern: "[a-z0-9_]{1,32}"
 
-# kind: PRD R-70 规定 unknown、dev、legacy。github、xposed 的 kind 用方案里的 official、repo。
+# kind 只写在 channels[] 里,不上报、不入库。
+# github=official, xposed=repo, dev=dev, legacy=legacy, unknown=unknown。
 # first_channel_only 为 true 时,该渠道只用于 install.first_channel。
+# 本期没有应用市场渠道。
 channels:
   - name: github
     kind: official
@@ -55,7 +57,6 @@ config_keys:
     min: 12
     max: 168
 
-# 客户端可以更严的数字不在这里:保留今天和前 7 天(R-35)、退避 1/2/4 小时(R-40)、记住最近 9 天删过的日期(R-37)。
 limits:
   # §6.4
   body_bytes: 32768
@@ -81,7 +82,12 @@ limits:
   measure_max: 2147483647
   lang_max_chars: 16
   day_key_length: 36
+  # R-34 的接收窗口。R-37 回拨超过这个天数时清空本地活跃记录,用同一个数。
   activity_window_past_days: 8
+  # 下面三项只在客户端使用。两端常量都写,避免只存在于一边。
+  retain_past_days: 7
+  deleted_day_memory_days: 9
+  retry_backoff_hours: "1,2,4"
 
 # device.* 的名字、类型、可空。数值上限在 limits,不在这里重复。
 # 不含 device.gms、device.rom_family。
