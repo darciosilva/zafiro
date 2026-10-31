@@ -590,7 +590,7 @@ abrir.*</string>
     <string name="mcp_service_token_title">Token Bearer</string>
     <string name="mcp_service_token_placeholder">Deixe em branco para permitir todos</string>
     <string name="mcp_service_token_description_empty">Nenhuma autenticação necessária</string>
-    <string name="mcp_service_token_description_configured">Autorização: Bearer <token> necessária</string>
+    <string name="mcp_service_token_description_configured">Autorização: Bearer &lt;token&gt; necessária</string>
     <string name="mcp_service_token_show">Mostrar Token Bearer</string>
     <string name="mcp_service_token_hide">Ocultar Token Bearer</string>
 
